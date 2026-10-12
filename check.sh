@@ -1,7 +1,19 @@
 #!/bin/sh
-# Локальная проверка HW1. Запуск из корня студенческого репозитория:
-#   sh ./check.sh
+# Локальная проверка домашней работы из корня репозитория.
+# Без аргумента проверяет HW1; номер работы можно указать явно.
 set -eu
+
+case "${1:-HW1}" in
+    HW1) ;;
+    HW2)
+        shift
+        exec python3 "$(dirname "$0")/hw2/check.py" "$@"
+        ;;
+    *)
+        printf '%s\n' "Укажите домашнюю работу: sh check.sh HW1 или sh check.sh HW2" >&2
+        exit 2
+        ;;
+esac
 
 label="mlsd-hw1-shell.run=hw1-$$-$(date +%s)"
 image="mlsd-hw1-local-${label#*=}"
@@ -183,6 +195,9 @@ done
 [ -n "$lockfile" ] || fail "отсутствует файл закреплённых зависимостей: создайте один из файлов, перечисленных в требованиях задания"
 
 [ -f README.md ] || fail "отсутствует файл README.md: создайте его с командами сборки и запуска"
+if head -n 20 Dockerfile | grep -Eq '^[[:space:]]*#[[:space:]]*syntax[[:space:]]*=' ; then
+    fail "уберите строку '# syntax=...': серверная проверка собирает со встроенным frontend и не загружает внешние frontend-образы"
+fi
 grep -Eiq '^[[:space:]]*docker[[:space:]]+build.*[[:space:]]\.[[:space:]]*$' README.md || fail "README.md должен содержать команду docker build с контекстом ."
 grep -Eiq '^[[:space:]]*docker[[:space:]]+run.*8080' README.md || fail "README.md должен содержать команду docker run с портом 8080"
 

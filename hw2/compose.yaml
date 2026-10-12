@@ -1,0 +1,247 @@
+x-airflow-common: &airflow-common
+  build:
+    context: ./airflow
+  environment: &airflow-env
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+    AIRFLOW__CORE__FERNET_KEY: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY="
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+    AIRFLOW__CORE__PARALLELISM: "2"
+    AIRFLOW__CORE__MAX_ACTIVE_TASKS_PER_DAG: "2"
+    AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+    AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+    AIRFLOW__WEBSERVER__SECRET_KEY: "hw2-local-airflow-secret-key"
+    AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+    SPARK_SCALA_VERSION: "2.12"
+    AIRFLOW_UID: "50000"
+    S3_ENDPOINT: http://seaweedfs:8333
+    S3_ACCESS_KEY: hw2-local
+    S3_SECRET_KEY: hw2-local-only
+    S3_REGION: us-east-1
+    REDIS_HOST: redis
+    REDIS_PORT: "6379"
+    SPARK_MASTER_URL: spark://spark-master:7077
+    SPARK_DRIVER_HOST: airflow-scheduler
+    SPARK_DRIVER_MEMORY: 512m
+    SPARK_EXECUTOR_MEMORY: 768m
+    SPARK_EXECUTOR_CORES: "1"
+    SPARK_CORES_MAX: "1"
+    SPARK_SHUFFLE_PARTITIONS: "4"
+    HW2_DATASET_PATH: /opt/airflow/hw2/data/sample.csv
+    HW2_SPARK_JOB: /opt/airflow/spark_jobs/customer_features.py
+    HW2_BUCKET: hw2
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags:ro
+    - ./data:/opt/airflow/hw2/data:ro
+    - ./spark/jobs:/opt/airflow/spark_jobs:ro
+  user: "50000:0"
+  networks:
+    - default
+  depends_on:
+    postgres:
+      condition: service_healthy
+
+services:
+  postgres:
+    image: postgres:16.6-bookworm@sha256:557fea37a744d5f4c8faab304b0a90858b53ab119735a88c131fd19dab802f36
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - default
+
+  redis:
+    image: redis:7.4.2-alpine@sha256:02419de7eddf55aa5bcf49efb74e88fa8d931b4d77c07eff8a6b2144472b6952
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks:
+      - default
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    command:
+      - server
+      - -dir=/data
+      - -s3
+      - -s3.port=8333
+      - -s3.config=/etc/seaweedfs/s3.json
+      - -ip=seaweedfs
+      - -ip.bind=0.0.0.0
+      - -master.volumeSizeLimitMB=100
+    environment:
+      AWS_ACCESS_KEY_ID: hw2-local
+      AWS_SECRET_ACCESS_KEY: hw2-local-only
+    volumes:
+      - seaweedfs-data:/data
+      - ./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -q -O /dev/null http://127.0.0.1:9333/cluster/status",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    networks:
+      - default
+
+  spark-master:
+    build:
+      context: ./spark
+    environment:
+      SPARK_ROLE: master
+      SPARK_SCALA_VERSION: "2.12"
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8080"
+      SPARK_DAEMON_MEMORY: 512m
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/json/', timeout=3)\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    networks:
+      - default
+
+  spark-worker:
+    build:
+      context: ./spark
+    environment:
+      SPARK_ROLE: worker
+      SPARK_SCALA_VERSION: "2.12"
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: "7077"
+      SPARK_WORKER_CORES: "1"
+      SPARK_WORKER_MEMORY: 1536m
+      SPARK_WORKER_WEBUI_PORT: "8081"
+      SPARK_DAEMON_MEMORY: 256m
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8081/', timeout=3)\"",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      - default
+
+  airflow-init:
+    <<: *airflow-common
+    entrypoint: /bin/bash
+    command:
+      - -lc
+      - |
+        set -euo pipefail
+        airflow db migrate
+        airflow users create \
+          --username "$${_AIRFLOW_WWW_USER_USERNAME}" \
+          --password "$${_AIRFLOW_WWW_USER_PASSWORD}" \
+          --firstname Local \
+          --lastname User \
+          --role Admin \
+          --email airflow@example.com || true
+    environment:
+      <<: *airflow-env
+      _AIRFLOW_WWW_USER_USERNAME: airflow
+      _AIRFLOW_WWW_USER_PASSWORD: airflow
+    restart: "no"
+    networks:
+      - default
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: webserver
+    ports:
+      - "127.0.0.1:${AIRFLOW_WEBSERVER_PORT:-8080}:8080"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "--fail",
+          "http://localhost:8080/health",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_healthy
+    networks:
+      - default
+    restart: on-failure
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: scheduler
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "curl",
+          "--fail",
+          "http://localhost:8974/health",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+      spark-master:
+        condition: service_healthy
+      spark-worker:
+        condition: service_healthy
+    networks:
+      - default
+    restart: on-failure
+
+volumes:
+  postgres-data:
+  seaweedfs-data:
+
+networks:
+  default:
