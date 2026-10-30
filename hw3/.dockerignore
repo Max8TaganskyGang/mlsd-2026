@@ -1,0 +1,10 @@
+*
+!Dockerfile
+!requirements.lock
+!airflow
+!bin
+!config
+!hw3pipeline
+!spark
+**/__pycache__
+**/*.pyc

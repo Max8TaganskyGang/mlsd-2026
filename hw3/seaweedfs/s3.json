@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "hw3",
+      "credentials": [
+        {
+          "accessKey": "local-hw3",
+          "secretKey": "local-hw3-only"
+        }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

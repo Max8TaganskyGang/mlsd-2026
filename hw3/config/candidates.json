@@ -1,0 +1,37 @@
+[
+  {
+    "experiment_id": "constant",
+    "family": "constant",
+    "preprocessing": [],
+    "estimator_params": {}
+  },
+  {
+    "experiment_id": "logistic_log1p_standard",
+    "family": "logistic",
+    "preprocessing": [
+      {"name": "log1p", "class": "sklearn.preprocessing.FunctionTransformer", "params": {"func": "numpy.log1p"}},
+      {"name": "scale", "class": "sklearn.preprocessing.StandardScaler", "params": {}}
+    ],
+    "estimator_params": {"C": 1.0, "max_iter": 1000}
+  },
+  {
+    "experiment_id": "logistic_standard",
+    "family": "logistic",
+    "preprocessing": [
+      {"name": "scale", "class": "sklearn.preprocessing.StandardScaler", "params": {}}
+    ],
+    "estimator_params": {"C": 1.0, "max_iter": 1000}
+  },
+  {
+    "experiment_id": "tree_depth3_leaf100",
+    "family": "tree",
+    "preprocessing": [],
+    "estimator_params": {"max_depth": 3, "min_samples_leaf": 100}
+  },
+  {
+    "experiment_id": "tree_depth4_leaf50",
+    "family": "tree",
+    "preprocessing": [],
+    "estimator_params": {"max_depth": 4, "min_samples_leaf": 50}
+  }
+]

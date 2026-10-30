@@ -1,0 +1,199 @@
+name: hw3
+
+x-hw3-build: &hw3-build
+  context: .
+  dockerfile: Dockerfile
+
+x-hw3-env: &hw3-env
+  AIRFLOW__CORE__EXECUTOR: LocalExecutor
+  AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@postgres/airflow
+  AIRFLOW__CORE__FERNET_KEY: "aHczLWxvY2FsLW9ubHktZmVybmV0LWtleS0zMmJ5dGU="
+  AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+  AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "false"
+  AIRFLOW__CORE__PARALLELISM: "4"
+  AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+  AIRFLOW__WEBSERVER__SECRET_KEY: hw3-local-webserver-secret
+  AIRFLOW__WEBSERVER__WORKERS: "2"
+  AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "false"
+  AIRFLOW__WEBSERVER__ACCESS_LOGFILE: /dev/null
+  AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: "true"
+  AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: "60"
+  AIRFLOW__LOGGING__DAG_PROCESSOR_LOG_TARGET: stdout
+  AWS_ACCESS_KEY_ID: local-hw3
+  AWS_SECRET_ACCESS_KEY: local-hw3-only
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_EC2_METADATA_DISABLED: "true"
+  HW3_S3_ENDPOINT: http://seaweedfs:8333
+  HW3_BUCKET: hw3
+  MLFLOW_TRACKING_URI: http://mlflow:5000
+  SPARK_MASTER_URL: spark://spark-master:7077
+  SPARK_DRIVER_HOST: airflow-scheduler
+  SPARK_DRIVER_MEMORY: 1g
+  SPARK_EXECUTOR_MEMORY: 1536m
+  SPARK_EXECUTOR_CORES: "2"
+  SPARK_CORES_MAX: "2"
+
+services:
+  postgres:
+    image: postgres:16.6-bookworm@sha256:557fea37a744d5f4c8faab304b0a90858b53ab119735a88c131fd19dab802f36
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks: [default]
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.48@sha256:4e61d15fd35994cb1e43e1e553dff106794841fd9a99ade2fc8c8bfce4d7872d
+    command:
+      - server
+      - -dir=/data
+      - -s3
+      - -s3.port=8333
+      - -s3.config=/etc/seaweedfs/s3.json
+      - -ip=seaweedfs
+      - -ip.bind=0.0.0.0
+      - -master.volumeSizeLimitMB=100
+    volumes:
+      - seaweedfs-data:/data
+      - ./seaweedfs/s3.json:/etc/seaweedfs/s3.json:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9333/cluster/status"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    networks: [default]
+
+  mlflow:
+    build: *hw3-build
+    entrypoint: ["/usr/bin/dumb-init", "--", "/opt/hw3/bin/service.sh"]
+    command: ["mlflow"]
+    volumes:
+      - mlflow-data:/mlflow
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:5000/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+    networks: [default]
+
+  spark-master:
+    build: *hw3-build
+    hostname: spark-master
+    entrypoint: ["/usr/bin/dumb-init", "--", "/opt/hw3/bin/service.sh"]
+    command: ["spark-master"]
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:8080/json/"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    networks: [default]
+
+  spark-worker:
+    build: *hw3-build
+    hostname: spark-worker
+    entrypoint: ["/usr/bin/dumb-init", "--", "/opt/hw3/bin/service.sh"]
+    command: ["spark-worker"]
+    environment:
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: 2g
+    volumes:
+      - ${HW3_INPUT_DIR:-./data}:/input:ro
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:8081/"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    networks: [default]
+
+  airflow-init:
+    build: *hw3-build
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -euo pipefail
+        airflow db migrate > /dev/null
+        if ! airflow users list 2>/dev/null | grep -qw hw3; then
+          airflow users create --username hw3 --password local-hw3-only \
+            --firstname HW3 --lastname Local --role Admin --email hw3@localhost > /dev/null
+        fi
+        for attempt in $$(seq 1 30); do
+          python -m hw3pipeline ensure_bucket && exit 0
+          sleep 2
+        done
+        echo "bucket hw3 could not be created" >&2
+        exit 1
+    environment: *hw3-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_healthy
+    restart: "no"
+    networks: [default]
+
+  airflow-webserver:
+    build: *hw3-build
+    command: ["webserver"]
+    environment: *hw3-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 30s
+    restart: on-failure
+    networks: [default]
+
+  airflow-scheduler:
+    build: *hw3-build
+    hostname: airflow-scheduler
+    command: ["scheduler"]
+    environment: *hw3-env
+    volumes:
+      - ${HW3_INPUT_DIR:-./data}:/input:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+      seaweedfs:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+      spark-worker:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--output", "/dev/null", "http://127.0.0.1:8974/health"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+      start_period: 40s
+    restart: on-failure
+    networks: [default]
+
+volumes:
+  postgres-data:
+  seaweedfs-data:
+  mlflow-data:
+
+networks:
+  default:
