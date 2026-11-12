@@ -144,12 +144,12 @@ def _activate_model(model_name: str, model_version: str, activation_id: str) -> 
         conn.close()
 
 
-def _ensure_model_loadable(model_name: str, model_version: str, timeout: float = 60.0) -> None:
+def _ensure_model_loadable(model_name: str, model_version: str, timeout: float = 10.0) -> None:
     try:
         resp = httpx.post(
             f"{MODEL_SERVICE}/load",
             json={"model_name": model_name, "model_version": model_version},
-            timeout=timeout,
+            timeout=httpx.Timeout(timeout, connect=2.0),
         )
     except Exception:
         raise ApiError("model_unavailable", "model-service unreachable", 503)
@@ -195,7 +195,7 @@ def _fetch_features(client_id: str, as_of: str) -> dict:
         resp = httpx.get(
             f"{FEATURE_SERVICE}/features",
             params={"client_id": client_id, "as_of": as_of},
-            timeout=10.0,
+            timeout=httpx.Timeout(4.0, connect=2.0),
         )
     except Exception:
         raise ApiError("features_unavailable", "feature-service unreachable", 503)
@@ -215,7 +215,7 @@ def _score(model_name: str, model_version: str, features: dict) -> float:
         resp = httpx.post(
             f"{MODEL_SERVICE}/predict",
             json={"model_name": model_name, "model_version": model_version, "features": features},
-            timeout=30.0,
+            timeout=httpx.Timeout(8.0, connect=2.0),
         )
     except Exception:
         raise ApiError("model_unavailable", "model-service unreachable", 503)
@@ -254,7 +254,7 @@ def health():
     if active is None:
         return JSONResponse({"status": "not_ready"}, status_code=503)
     try:
-        _ensure_model_loadable(active["model_name"], active["model_version"], timeout=20.0)
+        _ensure_model_loadable(active["model_name"], active["model_version"], timeout=5.0)
     except ApiError:
         return JSONResponse({"status": "not_ready"}, status_code=503)
     return JSONResponse({
@@ -299,10 +299,19 @@ def predict_batch(payload: Any = Body(None)):
     if not isinstance(items, list):
         raise ApiError("invalid_request", "items must be a list", 400)
     active = _require_active_model()
+    model_error: ApiError | None = None
+    if items:
+        try:
+            _ensure_model_loadable(active["model_name"], active["model_version"])
+        except ApiError as exc:
+            model_error = exc
     results = []
     for index, item in enumerate(items):
         try:
             client_id, as_of = _validate_item(item)
+            if model_error is not None:
+                _fetch_features(client_id, as_of)
+                raise model_error
             result = {"index": index, **_predict(client_id, as_of, active)}
         except ApiError as exc:
             result = {"index": index}

@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any
 
 os.environ.setdefault("MLFLOW_HTTP_REQUEST_MAX_RETRIES", "1")
-os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "10")
+os.environ.setdefault("MLFLOW_HTTP_REQUEST_BACKOFF_FACTOR", "1")
+os.environ.setdefault("MLFLOW_HTTP_REQUEST_TIMEOUT", "3")
 
 import joblib
 import mlflow
@@ -31,7 +32,7 @@ MLFLOW_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 
 app = FastAPI()
 mlflow.set_tracking_uri(MLFLOW_URI)
-_model_cache: dict[tuple[str, str], tuple[Any, list[str]]] = {}
+_model_cache: dict[tuple[str, str, str], tuple[Any, list[str]]] = {}
 _cache_lock = threading.Lock()
 
 
@@ -107,11 +108,11 @@ def _feature_order(bundle_dir: Path) -> list[str]:
 
 
 def _load_model(model_name: str, model_version: str) -> tuple[Any, list[str]]:
-    key = (model_name, model_version)
+    run_id = _resolve_run_id(model_name, model_version)
+    key = (model_name, model_version, run_id)
     with _cache_lock:
         if key in _model_cache:
             return _model_cache[key]
-    run_id = _resolve_run_id(model_name, model_version)
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
             bundle_dir = Path(
