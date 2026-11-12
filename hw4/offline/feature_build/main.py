@@ -115,29 +115,22 @@ def compute_features_for_snapshot(df: pd.DataFrame, as_of_dt: datetime) -> pd.Da
     dt90 = as_of_dt - timedelta(days=90)
     dt30 = as_of_dt - timedelta(days=30)
 
-    # Population: clients with any event strictly before as_of
-    eligible = df[df["invoice_at"] < as_of_dt]
+    df = df[df["customer_id"].fillna("").str.strip() != ""]
+    is_cancel = df["invoice_id"].fillna("").str.upper().str.startswith("C")
+    is_purchase = ~is_cancel & (df["quantity"] > 0) & (df["unit_price"] > 0)
+    before = df["invoice_at"] < as_of_dt
+
+    eligible = df[before]
     if eligible.empty:
         return pd.DataFrame()
     client_ids = eligible["customer_id"].unique()
 
-    # 90d window: [as_of - 90 days, as_of)
-    w90 = df[(df["invoice_at"] >= dt90) & (df["invoice_at"] < as_of_dt)]
-    # 30d window: [as_of - 30 days, as_of)
-    w30 = df[(df["invoice_at"] >= dt30) & (df["invoice_at"] < as_of_dt)]
-
-    # Purchases: quantity > 0 AND unit_price > 0
-    purchases90 = w90[(w90["quantity"] > 0) & (w90["unit_price"] > 0)]
-    # Cancellations: invoice_id starts with 'C'
-    cancels90 = w90[w90["invoice_id"].str.startswith("C", na=False)]
-    purchases30 = w30[(w30["quantity"] > 0) & (w30["unit_price"] > 0)]
-
-    # All purchases before as_of (for days_since_last_order)
-    all_purchases_before = df[
-        (df["invoice_at"] < as_of_dt)
-        & (df["quantity"] > 0)
-        & (df["unit_price"] > 0)
-    ]
+    in90 = before & (df["invoice_at"] >= dt90)
+    in30 = before & (df["invoice_at"] >= dt30)
+    purchases90 = df[in90 & is_purchase]
+    cancels90 = df[in90 & is_cancel]
+    purchases30 = df[in30 & is_purchase]
+    all_purchases_before = df[before & is_purchase]
 
     records = []
     for cid in client_ids:
@@ -146,7 +139,7 @@ def compute_features_for_snapshot(df: pd.DataFrame, as_of_dt: datetime) -> pd.Da
         p30 = purchases30[purchases30["customer_id"] == cid]
         past_purchases = all_purchases_before[all_purchases_before["customer_id"] == cid]
 
-        order_count_90d = len(p90)
+        order_count_90d = p90["invoice_id"].nunique()
         total_amount_90d = Decimal(0)
         for _, row in p90.iterrows():
             total_amount_90d += Decimal(str(row["quantity"])) * Decimal(str(row["unit_price"]))
@@ -166,15 +159,16 @@ def compute_features_for_snapshot(df: pd.DataFrame, as_of_dt: datetime) -> pd.Da
 
         distinct_stock_codes_90d = p90["stock_code"].nunique()
 
-        denom90 = order_count_90d + len(c90)
+        cancel_count_90d = c90["invoice_id"].nunique()
+        denom90 = order_count_90d + cancel_count_90d
         if denom90 == 0:
             return_rate_90d = Decimal("0.000000")
         else:
-            return_rate_90d = (Decimal(len(c90)) / Decimal(denom90)).quantize(
+            return_rate_90d = (Decimal(cancel_count_90d) / Decimal(denom90)).quantize(
                 Decimal("0.000001"), rounding=ROUND_HALF_EVEN
             )
 
-        order_count_30d = len(p30)
+        order_count_30d = p30["invoice_id"].nunique()
         total_amount_30d = Decimal(0)
         for _, row in p30.iterrows():
             total_amount_30d += Decimal(str(row["quantity"])) * Decimal(str(row["unit_price"]))
