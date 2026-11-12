@@ -22,7 +22,6 @@ PG_DSN = os.environ.get(
 )
 FEATURE_SERVICE = os.environ.get("HW4_FEATURE_SERVICE_URL", "http://feature-service:8081")
 MODEL_SERVICE = os.environ.get("HW4_MODEL_SERVICE_URL", "http://model-service:8082")
-MLFLOW_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 DECLARED_CODES = {
     "invalid_request", "client_not_found", "feature_not_found", "model_not_found",
@@ -145,22 +144,17 @@ def _activate_model(model_name: str, model_version: str, activation_id: str) -> 
         conn.close()
 
 
-def _ensure_model_exists(model_name: str, model_version: str) -> None:
+def _ensure_model_loadable(model_name: str, model_version: str, timeout: float = 60.0) -> None:
     try:
-        resp = httpx.get(
-            f"{MLFLOW_URI}/api/2.0/mlflow/model-versions/get",
-            params={"name": model_name, "version": model_version},
-            timeout=10.0,
+        resp = httpx.post(
+            f"{MODEL_SERVICE}/load",
+            json={"model_name": model_name, "model_version": model_version},
+            timeout=timeout,
         )
     except Exception:
-        raise ApiError("model_unavailable", "MLflow unreachable", 503)
-    if resp.status_code == 200:
-        return
-    if resp.status_code in (400, 404):
-        raise ApiError(
-            "model_not_found", f"model {model_name!r} version {model_version!r} not found", 404
-        )
-    raise ApiError("model_unavailable", f"MLflow returned {resp.status_code}", 503)
+        raise ApiError("model_unavailable", "model-service unreachable", 503)
+    if resp.status_code != 200:
+        raise _upstream_error(resp, "model_unavailable")
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +253,10 @@ def health():
     active = _get_active_model()
     if active is None:
         return JSONResponse({"status": "not_ready"}, status_code=503)
+    try:
+        _ensure_model_loadable(active["model_name"], active["model_version"], timeout=20.0)
+    except ApiError:
+        return JSONResponse({"status": "not_ready"}, status_code=503)
     return JSONResponse({
         "status": "ok",
         "model_name": active["model_name"],
@@ -282,7 +280,7 @@ def admin_activate(payload: Any = Body(None)):
         if not isinstance(value, str) or not value.strip():
             raise ApiError("invalid_request", f"{field} must be a non-empty string", 400)
         values[field] = value
-    _ensure_model_exists(values["model_name"], values["model_version"])
+    _ensure_model_loadable(values["model_name"], values["model_version"])
     return JSONResponse(
         _activate_model(values["model_name"], values["model_version"], values["activation_id"])
     )
@@ -302,18 +300,18 @@ def predict_batch(payload: Any = Body(None)):
         raise ApiError("invalid_request", "items must be a list", 400)
     active = _require_active_model()
     results = []
-    for item in items:
+    for index, item in enumerate(items):
         try:
             client_id, as_of = _validate_item(item)
-            results.append(_predict(client_id, as_of, active))
+            result = {"index": index, **_predict(client_id, as_of, active)}
         except ApiError as exc:
-            result = {}
+            result = {"index": index}
             if isinstance(item, dict):
                 for field in ("client_id", "as_of"):
                     if field in item:
                         result[field] = item[field]
             result.update(exc.body())
-            results.append(result)
+        results.append(result)
     return JSONResponse({"results": results})
 
 
