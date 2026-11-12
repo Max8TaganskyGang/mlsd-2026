@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "hw4",
+      "credentials": [
+        {
+          "accessKey": "local-hw4",
+          "secretKey": "local-hw4-only"
+        }
+      ],
+      "actions": ["Admin", "Read", "Write", "List", "Tagging"]
+    }
+  ]
+}

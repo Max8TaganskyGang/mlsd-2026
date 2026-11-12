@@ -1,0 +1,7 @@
+{
+  "schema_version": "hw4-serving-v1",
+  "models": [
+    {"name": "hw4-logistic", "family": "logistic"},
+    {"name": "hw4-boosting", "family": "boosting"}
+  ]
+}
