@@ -312,9 +312,9 @@ def predict_batch(payload: Any = Body(None)):
             if model_error is not None:
                 _fetch_features(client_id, as_of)
                 raise model_error
-            result = {"index": index, **_predict(client_id, as_of, active)}
+            result = {"index": index, "ok": True, **_predict(client_id, as_of, active)}
         except ApiError as exc:
-            result = {"index": index}
+            result = {"index": index, "ok": False}
             if isinstance(item, dict):
                 for field in ("client_id", "as_of"):
                     if field in item:
