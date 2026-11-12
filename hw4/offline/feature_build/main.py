@@ -311,6 +311,30 @@ def set_initial_active_model(model_name: str, model_version: str) -> None:
 # Main
 # ---------------------------------------------------------------------------
 
+def _arrow_type(source_type: str) -> pa.DataType:
+    if source_type == "int64":
+        return pa.int64()
+    precision, scale = source_type[len("decimal("):-1].split(",")
+    return pa.decimal128(int(precision), int(scale))
+
+
+def features_table(features_df: pd.DataFrame) -> pa.Table:
+    fields = [pa.field("client_id", pa.string(), nullable=False),
+              pa.field("as_of", pa.string(), nullable=False)]
+    columns = [pa.array(features_df["client_id"].astype(str).tolist(), pa.string()),
+               pa.array(features_df["as_of"].astype(str).tolist(), pa.string())]
+    for name, source_type in zip(FEATURE_NAMES, FEATURE_SOURCE_TYPES):
+        arrow_type = _arrow_type(source_type)
+        values = features_df[name].tolist()
+        if pa.types.is_decimal(arrow_type):
+            values = [Decimal(str(v)) for v in values]
+        else:
+            values = [int(v) for v in values]
+        fields.append(pa.field(name, arrow_type, nullable=False))
+        columns.append(pa.array(values, arrow_type))
+    return pa.Table.from_arrays(columns, schema=pa.schema(fields))
+
+
 def main() -> None:
     print("feature-build: starting")
 
@@ -336,8 +360,7 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         parquet_path = Path(tmpdir) / "features.parquet"
-        table = pa.Table.from_pandas(features_df, preserve_index=False)
-        pq.write_table(table, parquet_path)
+        pq.write_table(features_table(features_df), parquet_path)
         with open(parquet_path, "rb") as f:
             s3.put_object(
                 Bucket=BUCKET,

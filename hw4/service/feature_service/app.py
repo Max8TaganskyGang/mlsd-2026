@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 
 import redis as redis_lib
 import uvicorn
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 REDIS_HOST = os.environ.get("HW4_REDIS_HOST", "redis")
@@ -21,12 +23,25 @@ _redis: redis_lib.Redis | None = None
 def get_redis() -> redis_lib.Redis:
     global _redis
     if _redis is None:
-        _redis = redis_lib.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        _redis = redis_lib.Redis(
+            host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+            socket_connect_timeout=3, socket_timeout=3,
+        )
     return _redis
 
 
 def _err(code: str, message: str, status: int) -> JSONResponse:
     return JSONResponse({"error": {"code": code, "message": message}}, status_code=status)
+
+
+@app.exception_handler(RequestValidationError)
+def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:
+    return _err("invalid_request", "client_id and as_of query parameters are required", 400)
+
+
+@app.exception_handler(Exception)
+def _unhandled(_: Request, exc: Exception) -> JSONResponse:
+    return _err("features_unavailable", f"feature store failure: {type(exc).__name__}", 503)
 
 
 @app.get("/health")
@@ -39,21 +54,24 @@ def get_features(
     client_id: str = Query(...),
     as_of: str = Query(...),
 ):
-    r = get_redis()
+    if not client_id.strip():
+        return _err("invalid_request", "client_id must be non-empty", 400)
+    try:
+        datetime.strptime(as_of, "%Y-%m-%d")
+    except ValueError:
+        return _err("invalid_request", "as_of must be YYYY-MM-DD", 400)
+    as_of_ts = as_of + TIMESTAMP_SUFFIX
+    redis_key = f"hw4:features:{client_id}:{as_of_ts}"
 
-    # Normalize as_of: if DATE format (YYYY-MM-DD), append T00:00:00
-    if len(as_of) == 10:
-        as_of_ts = as_of + TIMESTAMP_SUFFIX
-    else:
-        as_of_ts = as_of
+    try:
+        r = get_redis()
+        client_exists = r.sismember("hw4:clients", client_id)
+        raw = r.get(redis_key) if client_exists else None
+    except redis_lib.RedisError as exc:
+        return _err("features_unavailable", f"redis unavailable: {type(exc).__name__}", 503)
 
-    # Check if client exists at all
-    client_exists = r.sismember("hw4:clients", client_id)
     if not client_exists:
         return _err("client_not_found", f"client {client_id!r} not found in feature store", 404)
-
-    redis_key = f"hw4:features:{client_id}:{as_of_ts}"
-    raw = r.get(redis_key)
     if raw is None:
         return _err("feature_not_found", f"no features for {client_id!r} at {as_of_ts}", 404)
 
